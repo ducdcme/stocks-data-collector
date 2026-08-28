@@ -17,6 +17,20 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str = field(default_factory=lambda: os.getenv("STOCKS_HOST", "127.0.0.1"))
@@ -31,6 +45,19 @@ class Settings:
     default_limit: int = field(default_factory=lambda: _int("STOCKS_DEFAULT_LIMIT", 300))
     max_limit: int = field(default_factory=lambda: _int("STOCKS_MAX_LIMIT", 2000))
     min_prepared_candles: int = field(default_factory=lambda: _int("STOCKS_MIN_PREPARED_CANDLES", 100))
+
+    corporate_action_auto: bool = field(
+        default_factory=lambda: _bool("STOCKS_CORPORATE_ACTION_AUTO", True)
+    )
+    corporate_action_lookback_days: int = field(
+        default_factory=lambda: _int("STOCKS_CORPORATE_ACTION_LOOKBACK_DAYS", 45)
+    )
+    corporate_action_factor_tolerance: float = field(
+        default_factory=lambda: _float("STOCKS_CORPORATE_ACTION_FACTOR_TOLERANCE", 0.0005)
+    )
+    corporate_action_price_tolerance: float = field(
+        default_factory=lambda: _float("STOCKS_CORPORATE_ACTION_PRICE_TOLERANCE", 0.05)
+    )
 
     ssi_consumer_id: str = field(default_factory=lambda: os.getenv("SSI_CONSUMER_ID", "").strip())
     ssi_consumer_secret: str = field(default_factory=lambda: os.getenv("SSI_CONSUMER_SECRET", "").strip())

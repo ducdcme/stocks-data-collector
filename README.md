@@ -1,6 +1,6 @@
-# VN Stocks Data Collector v0.2.1
+# VN Stocks Data Collector v0.2.5
 
-Local VN stock data service for Trading Signal v3.3.0.
+Production VN stock data service for Trading Signal v3.3.1.
 
 ## Current architecture
 
@@ -15,7 +15,7 @@ PostgreSQL stocks_data
           ↓
 REST API :8790
           ↓
-Trading Signal v3.3.0
+Trading Signal v3.3.1
 ```
 
 Trading Signal reads candles from PostgreSQL. SSI/Vnstock are upstream sources used by collector jobs.
@@ -135,7 +135,9 @@ python -m scripts.stats --symbols FPT HPG MBB DGC VIX
 python -m pytest -q
 ```
 
-Expected for v0.2.1: **43 passed**.
+Release regression target: **67 tests**.
+
+> Note: tests that intentionally exercise fake/in-memory API branches should be run in a clean test environment; a local `.env` with a real `STOCKS_DATABASE_URL` can select database-backed behavior for environment-sensitive tests.
 
 
 ## v0.2.1 production hardening
@@ -183,3 +185,64 @@ v0.2.3 restores the production/dev separation between chartability, signal readi
 - historical `sync_status=error` is diagnostic only and never forces a full backfill.
 - `>=100` candles remains signal readiness only; it never controls provider freshness.
 - `is_active` remains management/visibility state only.
+
+## Corporate-action auto reconciliation (v0.2.5)
+
+SSI is the canonical adjusted OHLC source. SDC never calculates adjusted prices itself. Daily Sync now performs two independent steps per active symbol:
+
+```text
+DB-first newer-edge sync
+        +
+SSI factor-transition lookback
+        ↓
+new unprocessed corporate action?
+  no  -> no historical fetch
+  yes -> fetch current SSI DailyOhlc history
+         diff PostgreSQL
+         update/insert only changed sessions
+         record processed event transactionally
+```
+
+The corporate-action check still runs when the newer edge is already current, so an SSI historical back-adjustment cannot be missed merely because PostgreSQL already has today's D1 candle. Processed events are stored in `corporate_action_events`; the same event is not reconciled again on subsequent daily jobs.
+
+Run the required migration once after upgrading:
+
+```bash
+python -m scripts.migrate
+```
+
+Normal daily sync (auto corporate-action detection is enabled by default):
+
+```bash
+python -m scripts.sync_daily --symbols MBB VIX NTP
+```
+
+Inspect processed events:
+
+```bash
+python -m scripts.corporate_action_events --symbols MBB VIX NTP
+```
+
+Temporarily disable the automatic check for diagnostics only:
+
+```bash
+python -m scripts.sync_daily --symbols MBB --no-corporate-action
+```
+
+Manual recovery/diagnostic mode remains available. SSI must independently verify every requested event before write mode is allowed:
+
+```bash
+python -m scripts.corporate_action --symbol MBB --event-date 2026-08-11
+python -m scripts.corporate_action --symbol MBB --event-date 2026-08-11 --apply --force
+```
+
+Configuration defaults:
+
+```env
+STOCKS_CORPORATE_ACTION_AUTO=true
+STOCKS_CORPORATE_ACTION_LOOKBACK_DAYS=45
+STOCKS_CORPORATE_ACTION_FACTOR_TOLERANCE=0.0005
+STOCKS_CORPORATE_ACTION_PRICE_TOLERANCE=0.05
+```
+
+`0.05` is 50 VND because persisted stock prices use thousand-VND units.

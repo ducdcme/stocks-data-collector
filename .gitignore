@@ -17,3 +17,8 @@ venv/
 # Runtime / local artifacts
 *.log
 .DS_Store
+
+# Corporate-action diagnostics
+adjustment_results/
+adjustment_detection_results/
+adjustment_dryrun_results/

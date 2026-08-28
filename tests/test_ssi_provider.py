@@ -97,3 +97,44 @@ def test_ssi_securities_cache_reuses_market_lookup(monkeypatch):
     assert p.find_security("HPG")["symbol"] == "HPG"
     securities_gets = [c for c in client.calls if c[0] == "GET" and c[1].endswith("/Securities")]
     assert len(securities_gets) == 1
+
+class DailyStockPriceChunkClient(FakeClient):
+    def get(self, url, params, headers):
+        self.calls.append(("GET", url, params, headers))
+        if url.endswith("/DailyStockPrice"):
+            from_date = params["fromDate"]
+            to_date = params["toDate"]
+            payload = {
+                "status": "Success",
+                "data": [
+                    {
+                        "TradingDate": from_date,
+                        "ClosePrice": "24000",
+                        "ClosePriceAdjusted": "20000",
+                    },
+                    {
+                        "TradingDate": to_date,
+                        "ClosePrice": "20000",
+                        "ClosePriceAdjusted": "20000",
+                    },
+                ],
+            }
+        else:
+            payload = {"status": "Success", "data": []}
+        return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+
+def test_ssi_daily_adjustment_factors_chunks_long_ranges():
+    client = DailyStockPriceChunkClient()
+    p = SSIProvider(consumer_id="id", consumer_secret="secret", client=client)
+    rows = p.daily_adjustment_factors(
+        "MBB", "HOSE", "2026-07-01", "2026-08-27", chunk_days=20
+    )
+    gets = [c for c in client.calls if c[0] == "GET" and c[1].endswith("/DailyStockPrice")]
+    assert len(gets) == 3
+    assert gets[0][2]["fromDate"] == "01/07/2026"
+    assert gets[0][2]["toDate"] == "20/07/2026"
+    assert gets[-1][2]["fromDate"] == "10/08/2026"
+    assert gets[-1][2]["toDate"] == "27/08/2026"
+    assert rows[0]["factor"] == 20000 / 24000
+    assert rows[-1]["factor"] == 1.0

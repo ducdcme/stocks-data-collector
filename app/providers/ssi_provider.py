@@ -242,3 +242,61 @@ class SSIProvider(StockProvider):
                     "name": str(row.get("StockName") or row.get("stockName") or row.get("StockEnName") or target).strip(),
                 }
         return None
+
+    def daily_adjustment_factors(
+        self,
+        symbol: str,
+        market: str,
+        start: str,
+        end: str,
+        chunk_days: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Read SSI DailyStockPrice and derive historical adjustment factors.
+
+        SSI limits DailyStockPrice date windows to at most 30 calendar days,
+        so this helper chunks longer ranges automatically and merges by date.
+        It is used only to detect corporate-action factor regime changes;
+        adjusted OHLC itself always comes from SSI DailyOhlc.
+        """
+        start_day = date.fromisoformat(start)
+        end_day = date.fromisoformat(end)
+        if start_day > end_day:
+            raise ValueError("start must be on or before end")
+        if chunk_days < 1 or chunk_days > 30:
+            raise ValueError("chunk_days must be between 1 and 30")
+
+        merged: dict[str, dict[str, Any]] = {}
+        cursor = start_day
+        while cursor <= end_day:
+            chunk_end = min(end_day, cursor + timedelta(days=chunk_days - 1))
+            payload = self._get(
+                "DailyStockPrice",
+                {
+                    "symbol": symbol.upper(),
+                    "market": market.upper(),
+                    "fromDate": cursor.strftime("%d/%m/%Y"),
+                    "toDate": chunk_end.strftime("%d/%m/%Y"),
+                    "pageIndex": 1,
+                    "pageSize": 1000,
+                    "ascending": True,
+                },
+            )
+            for row in list(payload.get("data") or []):
+                raw = row.get("ClosePrice", row.get("closePrice"))
+                adjusted = row.get("ClosePriceAdjusted", row.get("closePriceAdjusted"))
+                if raw in (None, "", 0, "0") or adjusted in (None, ""):
+                    continue
+                raw_value = float(str(raw).replace(",", ""))
+                adjusted_value = float(str(adjusted).replace(",", ""))
+                if raw_value <= 0:
+                    continue
+                day = self._ssi_date(row.get("TradingDate") or row.get("tradingDate"))
+                merged[day] = {
+                    "date": day,
+                    "raw_close": raw_value,
+                    "adjusted_close": adjusted_value,
+                    "factor": adjusted_value / raw_value,
+                }
+            cursor = chunk_end + timedelta(days=1)
+
+        return [merged[key] for key in sorted(merged)]

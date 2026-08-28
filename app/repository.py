@@ -393,3 +393,206 @@ def get_daily_candles(
         }
         for row in rows
     ]
+
+
+def get_instrument_candles_with_provider(
+    instrument_id: int,
+    database_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read all persisted candles for corporate-action rebuild planning."""
+    with connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT trade_date, open, high, low, close, volume, provider
+                FROM daily_candles
+                WHERE instrument_id = %s
+                ORDER BY trade_date
+                """,
+                (instrument_id,),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "date": row["trade_date"].isoformat(),
+            "open": float(row["open"]), "high": float(row["high"]),
+            "low": float(row["low"]), "close": float(row["close"]),
+            "volume": float(row["volume"]), "provider": str(row.get("provider") or ""),
+        }
+        for row in rows
+    ]
+
+
+
+
+def get_processed_corporate_action_events(
+    instrument_id: int,
+    start: str | None = None,
+    end: str | None = None,
+    database_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return SSI corporate-action events already reconciled for an instrument."""
+    clauses = ["instrument_id = %s"]
+    params: list[Any] = [instrument_id]
+    if start:
+        clauses.append("event_date >= %s")
+        params.append(date.fromisoformat(start))
+    if end:
+        clauses.append("event_date <= %s")
+        params.append(date.fromisoformat(end))
+
+    with connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT instrument_id, event_date, previous_factor, new_factor,
+                       ratio_change_pct, source, reconciliation_updated,
+                       reconciliation_inserted, processed_at
+                FROM corporate_action_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY event_date
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            **dict(row),
+            "event_date": row["event_date"].isoformat(),
+            "previous_factor": float(row["previous_factor"]) if row["previous_factor"] is not None else None,
+            "new_factor": float(row["new_factor"]) if row["new_factor"] is not None else None,
+            "ratio_change_pct": float(row["ratio_change_pct"]) if row["ratio_change_pct"] is not None else None,
+        }
+        for row in rows
+    ]
+
+
+def processed_corporate_action_dates(
+    instrument_id: int,
+    start: str | None = None,
+    end: str | None = None,
+    database_url: str | None = None,
+) -> set[str]:
+    return {
+        row["event_date"]
+        for row in get_processed_corporate_action_events(
+            instrument_id, start=start, end=end, database_url=database_url
+        )
+    }
+
+
+def apply_corporate_action_reconciliation(
+    instrument_id: int,
+    updates: list[dict[str, Any]],
+    inserts: list[dict[str, Any]],
+    provider: str = "ssi",
+    database_url: str | None = None,
+    processed_events: list[dict[str, Any]] | None = None,
+) -> dict[str, int]:
+    """Apply an SSI historical reconciliation in one transaction.
+
+    Existing candle volume is preserved on UPDATE because this repair only
+    reconciles adjusted OHLC. New sessions use SSI volume. No persisted row is
+    deleted. The caller must build/validate the plan before invoking this.
+    """
+    processed_events = processed_events or []
+    if not updates and not inserts and not processed_events:
+        return {"updated": 0, "inserted": 0, "events_recorded": 0}
+
+    with connect(database_url) as conn:
+        with conn.cursor() as cur:
+            updated = 0
+            inserted = 0
+
+            for row in updates:
+                cur.execute(
+                    """
+                    UPDATE daily_candles
+                    SET open = %s, high = %s, low = %s, close = %s,
+                        provider = %s, updated_at = now()
+                    WHERE instrument_id = %s AND trade_date = %s
+                    """,
+                    (
+                        row["open"], row["high"], row["low"], row["close"],
+                        provider, instrument_id, date.fromisoformat(row["date"]),
+                    ),
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError(
+                        f"Corporate-action reconciliation expected one existing row for {row['date']}, got {cur.rowcount}"
+                    )
+                updated += 1
+
+            for row in inserts:
+                cur.execute(
+                    """
+                    INSERT INTO daily_candles(
+                        instrument_id, trade_date, open, high, low, close, volume, provider
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (instrument_id, trade_date) DO NOTHING
+                    """,
+                    (
+                        instrument_id, date.fromisoformat(row["date"]),
+                        row["open"], row["high"], row["low"], row["close"],
+                        row.get("volume", 0), provider,
+                    ),
+                )
+                if cur.rowcount != 1:
+                    raise RuntimeError(
+                        f"Corporate-action reconciliation expected one new row for {row['date']}, got {cur.rowcount}"
+                    )
+                inserted += 1
+
+            events_recorded = 0
+            for event in processed_events:
+                cur.execute(
+                    """
+                    INSERT INTO corporate_action_events(
+                        instrument_id, event_date, previous_factor, new_factor,
+                        ratio_change_pct, source, reconciliation_updated,
+                        reconciliation_inserted, processed_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (instrument_id, event_date) DO UPDATE
+                    SET previous_factor = EXCLUDED.previous_factor,
+                        new_factor = EXCLUDED.new_factor,
+                        ratio_change_pct = EXCLUDED.ratio_change_pct,
+                        source = EXCLUDED.source,
+                        reconciliation_updated = EXCLUDED.reconciliation_updated,
+                        reconciliation_inserted = EXCLUDED.reconciliation_inserted,
+                        processed_at = now()
+                    """,
+                    (
+                        instrument_id,
+                        date.fromisoformat(str(event["event_date"])[:10]),
+                        event.get("previous_factor"),
+                        event.get("new_factor"),
+                        event.get("ratio_change_pct"),
+                        event.get("source", provider),
+                        updated,
+                        inserted,
+                    ),
+                )
+                events_recorded += 1
+
+        conn.commit()
+
+    return {"updated": updated, "inserted": inserted, "events_recorded": events_recorded}
+
+
+# Backward-compatible alias for dev scripts that may still import the old name.
+def apply_corporate_action_updates(
+    instrument_id: int,
+    updates: list[dict[str, Any]],
+    provider: str = "ssi",
+    database_url: str | None = None,
+) -> int:
+    result = apply_corporate_action_reconciliation(
+        instrument_id=instrument_id,
+        updates=updates,
+        inserts=[],
+        provider=provider,
+        database_url=database_url,
+    )
+    return result["updated"]
