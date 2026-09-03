@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.8
+
+- Make missing-symbol catalog lookup holiday-safe when SSI `Securities` has no data.
+- Vnstock fallback no longer requires `equity.list()` to contain an exchange field; it resolves HOSE/HNX/UPCOM through dedicated exchange/group membership endpoints.
+- Preserve normal fast-path behavior when Vnstock already supplies valid exchange metadata.
+
 ## 0.2.7
 
 - Make SSI stock-universe discovery holiday-safe when `Securities` or `IndexComponents` returns `There is no data`.

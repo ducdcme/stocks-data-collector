@@ -134,3 +134,72 @@ def test_empty_historical_chunk_retries(monkeypatch):
     records = provider._fetch_ohlcv_with_retry("FPT", "2024-01-01", "2024-04-01")
     assert calls["n"] == 2
     assert len(records) == 1
+
+
+def test_find_security_resolves_exchange_from_list_by_exchange_when_list_omits_exchange(monkeypatch):
+    provider = VnstockProvider(requests_per_minute=100000)
+
+    class Equity:
+        def list(self):
+            return [{"symbol": "HAG", "organ_name": "Hoang Anh Gia Lai"}]
+
+        def list_by_exchange(self):
+            return [{"symbol": "HAG", "exchange": "HOSE"}]
+
+    class Reference:
+        equity = Equity()
+
+    monkeypatch.setattr(VnstockProvider, "_reference", staticmethod(lambda: Reference()))
+    monkeypatch.setattr(provider, "_throttle", lambda: None)
+
+    row = provider.find_security("HAG")
+
+    assert row == {"symbol": "HAG", "exchange": "HOSE", "name": "Hoang Anh Gia Lai"}
+
+
+def test_find_security_resolves_exchange_from_group_when_exchange_list_has_no_exchange_column(monkeypatch):
+    provider = VnstockProvider(requests_per_minute=100000)
+
+    class Equity:
+        def list(self):
+            return [{"symbol": "HDG", "organ_name": "Ha Do"}]
+
+        def list_by_exchange(self):
+            return [{"symbol": "HDG"}]
+
+        def list_by_group(self, group=None):
+            return [{"symbol": "HDG"}] if group == "HOSE" else []
+
+    class Reference:
+        equity = Equity()
+
+    monkeypatch.setattr(VnstockProvider, "_reference", staticmethod(lambda: Reference()))
+    monkeypatch.setattr(provider, "_throttle", lambda: None)
+
+    row = provider.find_security("HDG")
+
+    assert row == {"symbol": "HDG", "exchange": "HOSE", "name": "Ha Do"}
+
+
+def test_find_security_survives_all_symbols_no_data_using_exchange_membership(monkeypatch):
+    provider = VnstockProvider(requests_per_minute=100000)
+
+    class Equity:
+        def list(self):
+            raise RuntimeError("There is no data")
+
+        def list_by_exchange(self):
+            raise RuntimeError("There is no data")
+
+        def list_by_group(self, group=None):
+            return [{"symbol": "TRA"}] if group == "HOSE" else []
+
+    class Reference:
+        equity = Equity()
+
+    monkeypatch.setattr(VnstockProvider, "_reference", staticmethod(lambda: Reference()))
+    monkeypatch.setattr(provider, "_throttle", lambda: None)
+
+    row = provider.find_security("TRA")
+
+    assert row == {"symbol": "TRA", "exchange": "HOSE", "name": "TRA"}

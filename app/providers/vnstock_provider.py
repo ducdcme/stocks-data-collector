@@ -286,36 +286,123 @@ class VnstockProvider(StockProvider):
             return equity.list()
         raise RuntimeError("Unsupported Vnstock v4 equity reference interface")
 
+    @staticmethod
+    def _security_symbol(row: dict[str, Any]) -> str:
+        lowered = {str(k).lower(): v for k, v in row.items()}
+        return str(
+            lowered.get("symbol")
+            or lowered.get("ticker")
+            or lowered.get("code")
+            or lowered.get("symbol_code")
+            or ""
+        ).strip().upper()
+
+    @staticmethod
+    def _normalize_exchange(value: Any) -> str:
+        raw = str(value or "").strip().upper()
+        aliases = {
+            "HSX": "HOSE",
+            "HO": "HOSE",
+            "HOSE": "HOSE",
+            "HNX": "HNX",
+            "UPCOM": "UPCOM",
+            "UPCOMINDEX": "UPCOM",
+        }
+        return aliases.get(raw, raw)
+
+    @classmethod
+    def _security_exchange(cls, row: dict[str, Any]) -> str:
+        lowered = {str(k).lower(): v for k, v in row.items()}
+        return cls._normalize_exchange(
+            lowered.get("exchange")
+            or lowered.get("market")
+            or lowered.get("exchange_code")
+            or lowered.get("exchange_name")
+            or lowered.get("comgroupcode")
+        )
+
+    @staticmethod
+    def _security_name(row: dict[str, Any], target: str) -> str:
+        lowered = {str(k).lower(): v for k, v in row.items()}
+        return str(
+            lowered.get("organ_name")
+            or lowered.get("organname")
+            or lowered.get("company_name")
+            or lowered.get("companyname")
+            or lowered.get("name")
+            or target
+        ).strip()
+
+    def _find_exchange_membership(self, target: str) -> str:
+        """Resolve exchange without trusting equity.list() metadata.
+
+        Vnstock Community may return a valid symbol list while omitting the
+        exchange column (notably around long Vietnamese market holidays).
+        Prefer the dedicated exchange reference endpoint and, for compatibility
+        with v4 builds, fall back to explicit HOSE/HNX/UPCOM group membership.
+        """
+        ref = self._reference()
+        equity = getattr(ref, "equity", None)
+        if equity is None:
+            raise RuntimeError("Vnstock Reference.equity API is unavailable")
+
+        errors: list[str] = []
+        by_exchange = getattr(equity, "list_by_exchange", None)
+        if callable(by_exchange):
+            try:
+                self._throttle()
+                for row in self._records(by_exchange()):
+                    if self._security_symbol(row) != target:
+                        continue
+                    exchange = self._security_exchange(row)
+                    if exchange in {"HOSE", "HNX", "UPCOM"}:
+                        return exchange
+            except Exception as exc:
+                errors.append(f"list_by_exchange: {exc}")
+
+        by_group = getattr(equity, "list_by_group", None)
+        if callable(by_group):
+            for exchange in ("HOSE", "HNX", "UPCOM"):
+                try:
+                    self._throttle()
+                    try:
+                        frame = by_group(group=exchange)
+                    except TypeError:
+                        frame = by_group(exchange)
+                    if any(self._security_symbol(row) == target for row in self._records(frame)):
+                        return exchange
+                except Exception as exc:
+                    errors.append(f"list_by_group({exchange}): {exc}")
+
+        if errors:
+            logger.warning("Vnstock exchange lookup failed for %s: %s", target, " | ".join(errors))
+        return ""
+
     def find_security(self, symbol: str) -> dict[str, str] | None:
         target = symbol.strip().upper()
-        self._throttle()
-        frame = self._fetch_security_list()
-        rows = self._records(frame)
-        for row in rows:
-            lowered = {str(k).lower(): v for k, v in row.items()}
-            row_symbol = str(
-                lowered.get("symbol")
-                or lowered.get("ticker")
-                or lowered.get("code")
-                or ""
-            ).upper()
-            if row_symbol != target:
-                continue
-            raw_exchange = str(
-                lowered.get("exchange")
-                or lowered.get("market")
-                or lowered.get("comgroupcode")
-                or ""
-            ).upper()
-            aliases = {"HSX": "HOSE", "HO": "HOSE", "UPCOM": "UPCOM", "HNX": "HNX"}
-            exchange = aliases.get(raw_exchange, raw_exchange)
-            name = str(
-                lowered.get("organ_name")
-                or lowered.get("organname")
-                or lowered.get("company_name")
-                or lowered.get("companyname")
-                or lowered.get("name")
-                or target
-            ).strip()
+        matched_row: dict[str, Any] | None = None
+        list_error: Exception | None = None
+
+        try:
+            self._throttle()
+            rows = self._records(self._fetch_security_list())
+            matched_row = next((row for row in rows if self._security_symbol(row) == target), None)
+        except Exception as exc:
+            # A holiday/stale reference response must not prevent the dedicated
+            # exchange-membership fallback from identifying a valid stock.
+            list_error = exc
+
+        if matched_row is not None:
+            exchange = self._security_exchange(matched_row)
+            name = self._security_name(matched_row, target)
+            if exchange not in {"HOSE", "HNX", "UPCOM"}:
+                exchange = self._find_exchange_membership(target)
             return {"symbol": target, "exchange": exchange, "name": name}
+
+        exchange = self._find_exchange_membership(target)
+        if exchange:
+            return {"symbol": target, "exchange": exchange, "name": target}
+
+        if list_error is not None:
+            raise RuntimeError(f"Vnstock security reference unavailable: {list_error}") from list_error
         return None
