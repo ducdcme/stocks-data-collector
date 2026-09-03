@@ -1,4 +1,4 @@
-# Deploy VN Stocks Data Collector v0.2.5 on Ubuntu VPS
+# Deploy VN Stocks Data Collector v0.2.6 on Ubuntu VPS
 
 GitHub is the source of truth for application code. Production runtime state, PostgreSQL data, logs and secrets remain on the VPS and are never committed to Git.
 
@@ -22,7 +22,7 @@ sudo chown -R $USER:$USER /opt/stocks-data-collector
 git clone <YOUR_GITHUB_REPO_URL> /opt/stocks-data-collector
 cd /opt/stocks-data-collector
 git fetch --tags
-git checkout v0.2.5
+git checkout v0.2.6
 ```
 
 Create the virtual environment and install dependencies:
@@ -122,9 +122,9 @@ curl http://127.0.0.1:8790/health
 curl http://127.0.0.1:8790/health/db
 ```
 
-`/health` must report version `0.2.5`.
+`/health` must report version `0.2.6`.
 
-## 6. Upgrade an existing v0.2.4 installation to v0.2.5
+## 6. Upgrade an existing v0.2.5 installation to v0.2.6
 
 Back up the PostgreSQL database according to the VPS backup policy before a release upgrade. Then deploy the tested Git tag:
 
@@ -132,7 +132,7 @@ Back up the PostgreSQL database according to the VPS backup policy before a rele
 cd /opt/stocks-data-collector
 git status
 git fetch --tags
-git checkout v0.2.5
+git checkout v0.2.6
 
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -184,7 +184,7 @@ python -m scripts.corporate_action --symbol MBB --event-date 2026-08-11 --apply 
 
 ## 8. Rollback code
 
-If v0.2.5 has an application-level problem, stop the service and checkout the previous tested tag:
+If v0.2.6 has an application-level problem, stop the service and checkout the previous tested tag:
 
 ```bash
 cd /opt/stocks-data-collector

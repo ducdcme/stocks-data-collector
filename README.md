@@ -1,4 +1,4 @@
-# VN Stocks Data Collector v0.2.5
+# VN Stocks Data Collector v0.2.6
 
 Production VN stock data service for Trading Signal v3.3.1.
 

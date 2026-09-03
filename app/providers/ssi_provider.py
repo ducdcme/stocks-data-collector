@@ -136,7 +136,13 @@ class SSIProvider(StockProvider):
             normalized[day] = {"date": day, **values}
         return [normalized[key] for key in sorted(normalized)]
 
-    def _get(self, path: str, params: dict[str, Any]) -> dict:
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any],
+        *,
+        allow_no_data: bool = False,
+    ) -> dict:
         token = self._get_token()
         response = self._retry_http(
             path,
@@ -159,7 +165,10 @@ class SSIProvider(StockProvider):
         response.raise_for_status()
         payload = response.json()
         status = str(payload.get("status", "")).lower()
+        message = str(payload.get("message") or "").strip().lower()
         if status not in ("success", "200", "") and not payload.get("data"):
+            if allow_no_data and message == "there is no data":
+                return {**payload, "data": []}
             raise RuntimeError(f"SSI {path} failed: {payload.get('message') or payload.get('status')}")
         return payload
 
@@ -280,6 +289,7 @@ class SSIProvider(StockProvider):
                     "pageSize": 1000,
                     "ascending": True,
                 },
+                allow_no_data=True,
             )
             for row in list(payload.get("data") or []):
                 raw = row.get("ClosePrice", row.get("closePrice"))

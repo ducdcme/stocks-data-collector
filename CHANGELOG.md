@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.7
+
+- Make SSI stock-universe discovery holiday-safe when `Securities` or `IndexComponents` returns `There is no data`.
+- Prefer last-known-good SSI group cache; otherwise fall back exchange groups to active PostgreSQL instruments without inventing VN30 membership.
+
+
+## v0.2.6
+
+- Fixed SSI `DailyStockPrice` empty-window handling during automatic corporate-action checks.
+- `message = "There is no data"` is now treated as an empty factor chunk only for the `DailyStockPrice` caller.
+- Other SSI endpoints retain fail-fast behavior for non-success empty responses.
+- Added regression coverage for BMP-style no-data windows and endpoint isolation.
+
 ## v0.2.5
 
 - Added automatic SSI corporate-action detection to Daily Sync.

@@ -138,3 +138,32 @@ def test_ssi_daily_adjustment_factors_chunks_long_ranges():
     assert gets[-1][2]["toDate"] == "27/08/2026"
     assert rows[0]["factor"] == 20000 / 24000
     assert rows[-1]["factor"] == 1.0
+
+
+class DailyStockPriceNoDataClient(FakeClient):
+    def get(self, url, params, headers):
+        self.calls.append(("GET", url, params, headers))
+        payload = {"status": "Error", "message": "There is no data", "data": []}
+        return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+
+def test_ssi_daily_adjustment_factors_treats_no_data_as_empty():
+    client = DailyStockPriceNoDataClient()
+    p = SSIProvider(consumer_id="id", consumer_secret="secret", client=client)
+    rows = p.daily_adjustment_factors(
+        "BMP", "HOSE", "2026-08-01", "2026-09-03", chunk_days=20
+    )
+    gets = [c for c in client.calls if c[0] == "GET" and c[1].endswith("/DailyStockPrice")]
+    assert len(gets) == 2
+    assert rows == []
+
+
+def test_ssi_other_endpoints_still_raise_on_no_data_status():
+    client = DailyStockPriceNoDataClient()
+    p = SSIProvider(consumer_id="id", consumer_secret="secret", client=client)
+    try:
+        p._get("Securities", {"pageIndex": 1, "pageSize": 1000})
+    except RuntimeError as exc:
+        assert str(exc) == "SSI Securities failed: There is no data"
+    else:
+        raise AssertionError("Expected RuntimeError for non-DailyStockPrice endpoint")
