@@ -167,3 +167,61 @@ def test_ssi_other_endpoints_still_raise_on_no_data_status():
         assert str(exc) == "SSI Securities failed: There is no data"
     else:
         raise AssertionError("Expected RuntimeError for non-DailyStockPrice endpoint")
+
+class QuotaThenSuccessClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.securities_calls = 0
+
+    def get(self, url, params, headers):
+        self.calls.append(("GET", url, params, headers))
+        self.securities_calls += 1
+        if self.securities_calls == 1:
+            payload = {
+                "status": "Error",
+                "message": "API calls quota exceeded! maximum admitted 1 per 1s.",
+                "data": [],
+            }
+        else:
+            payload = {
+                "status": "Success",
+                "message": "Success",
+                "data": [{"Symbol": "FPT", "Market": "HOSE", "StockName": "FPT Corp"}],
+            }
+        return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+
+
+def test_ssi_retries_quota_error_without_failing_caller(monkeypatch):
+    monkeypatch.setenv("SSI_QUOTA_RETRIES", "2")
+    monkeypatch.setenv("SSI_QUOTA_RETRY_DELAY_SECONDS", "0")
+    client = QuotaThenSuccessClient()
+    p = SSIProvider(consumer_id="id", consumer_secret="secret", client=client)
+    assert p.market_securities("HOSE") == [
+        {"symbol": "FPT", "exchange": "HOSE", "name": "FPT Corp"}
+    ]
+    assert client.securities_calls == 2
+
+
+def test_ssi_rate_limiter_is_shared_across_provider_instances(monkeypatch):
+    monkeypatch.setenv("SSI_MIN_REQUEST_INTERVAL_SECONDS", "1.05")
+    clock = {"now": 100.0}
+    sleeps = []
+
+    def fake_monotonic():
+        return clock["now"]
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr("app.providers.ssi_provider.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("app.providers.ssi_provider.time.sleep", fake_sleep)
+    SSIProvider._last_request_at.clear()
+
+    first = SSIProvider(consumer_id="id", consumer_secret="secret", client=FakeClient())
+    second = SSIProvider(consumer_id="id", consumer_secret="secret", client=FakeClient())
+    first._wait_for_rate_slot()
+    second._wait_for_rate_slot()
+
+    assert len(sleeps) == 1
+    assert abs(sleeps[0] - 1.05) < 1e-9

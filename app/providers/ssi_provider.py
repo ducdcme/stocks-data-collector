@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 import logging
 import os
 import time
+import threading
 from typing import Any
 
 import httpx
@@ -24,6 +25,12 @@ class SSIProvider(StockProvider):
 
     name = "ssi"
     DEFAULT_BASE_URL = "https://fc-data.ssi.com.vn/api/v2/Market"
+
+    # SSI applies a provider-wide request quota (observed as max 1 call / 1s).
+    # Keep a process-wide gate so separate SSIProvider instances cannot race
+    # each other and accidentally burst the upstream API.
+    _rate_lock = threading.Lock()
+    _last_request_at: dict[str, float] = {}
 
     def __init__(
         self,
@@ -46,6 +53,9 @@ class SSIProvider(StockProvider):
         self._token_ttl_seconds = int(os.getenv("SSI_TOKEN_CACHE_SECONDS", "1800"))
         self._request_retries = max(0, int(os.getenv("SSI_REQUEST_RETRIES", "2")))
         self._retry_delay_seconds = max(0.0, float(os.getenv("SSI_RETRY_DELAY_SECONDS", "1")))
+        self._min_request_interval_seconds = max(0.0, float(os.getenv("SSI_MIN_REQUEST_INTERVAL_SECONDS", "1.05")))
+        self._quota_retries = max(0, int(os.getenv("SSI_QUOTA_RETRIES", "2")))
+        self._quota_retry_delay_seconds = max(0.0, float(os.getenv("SSI_QUOTA_RETRY_DELAY_SECONDS", "1.10")))
         self._securities_cache_seconds = max(0, int(os.getenv("SSI_SECURITIES_CACHE_SECONDS", "300")))
         self._securities_cache: dict[str, tuple[float, list[dict]]] = {}
 
@@ -56,11 +66,30 @@ class SSIProvider(StockProvider):
     def _http(self) -> httpx.Client:
         return self._client
 
+    def _wait_for_rate_slot(self) -> None:
+        """Serialize SSI HTTP calls inside this process to respect upstream quota."""
+        interval = self._min_request_interval_seconds
+        if interval <= 0:
+            return
+        key = self.base_url.lower()
+        with self.__class__._rate_lock:
+            now = time.monotonic()
+            last = self.__class__._last_request_at.get(key)
+            if last is not None:
+                delay = interval - (now - last)
+                if delay > 0:
+                    time.sleep(delay)
+            # Reserve the slot immediately before the request is issued. Holding
+            # the lock across the sleep prevents concurrent callers from taking
+            # the same slot.
+            self.__class__._last_request_at[key] = time.monotonic()
+
     def _retry_http(self, label: str, operation):
-        """Retry transient network/timeout failures before provider fallback."""
+        """Rate-limit SSI calls and retry transient network/timeout failures."""
         attempts = self._request_retries + 1
         for attempt in range(1, attempts + 1):
             try:
+                self._wait_for_rate_slot()
                 return operation()
             except httpx.TransportError as exc:
                 if attempt >= attempts:
@@ -136,6 +165,11 @@ class SSIProvider(StockProvider):
             normalized[day] = {"date": day, **values}
         return [normalized[key] for key in sorted(normalized)]
 
+    @staticmethod
+    def _is_quota_message(message: str) -> bool:
+        text = str(message or "").strip().lower()
+        return "quota exceeded" in text or "maximum admitted" in text
+
     def _get(
         self,
         path: str,
@@ -144,16 +178,9 @@ class SSIProvider(StockProvider):
         allow_no_data: bool = False,
     ) -> dict:
         token = self._get_token()
-        response = self._retry_http(
-            path,
-            lambda: self._http().get(
-                f"{self.base_url}/{path}",
-                params=params,
-                headers={"Authorization": f"Bearer {token}"},
-            ),
-        )
-        if response.status_code == 401:
-            token = self._get_token(force=True)
+        quota_attempts = self._quota_retries + 1
+
+        for quota_attempt in range(1, quota_attempts + 1):
             response = self._retry_http(
                 path,
                 lambda: self._http().get(
@@ -162,15 +189,38 @@ class SSIProvider(StockProvider):
                     headers={"Authorization": f"Bearer {token}"},
                 ),
             )
-        response.raise_for_status()
-        payload = response.json()
-        status = str(payload.get("status", "")).lower()
-        message = str(payload.get("message") or "").strip().lower()
-        if status not in ("success", "200", "") and not payload.get("data"):
-            if allow_no_data and message == "there is no data":
-                return {**payload, "data": []}
-            raise RuntimeError(f"SSI {path} failed: {payload.get('message') or payload.get('status')}")
-        return payload
+            if response.status_code == 401:
+                token = self._get_token(force=True)
+                response = self._retry_http(
+                    path,
+                    lambda: self._http().get(
+                        f"{self.base_url}/{path}",
+                        params=params,
+                        headers={"Authorization": f"Bearer {token}"},
+                    ),
+                )
+            response.raise_for_status()
+            payload = response.json()
+            status = str(payload.get("status", "")).lower()
+            raw_message = str(payload.get("message") or "").strip()
+            message = raw_message.lower()
+
+            if status not in ("success", "200", "") and not payload.get("data"):
+                if allow_no_data and message == "there is no data":
+                    return {**payload, "data": []}
+                if self._is_quota_message(raw_message) and quota_attempt < quota_attempts:
+                    delay = self._quota_retry_delay_seconds * quota_attempt
+                    logger.warning(
+                        "SSI %s quota exceeded; retry %s/%s in %.2fs",
+                        path, quota_attempt, self._quota_retries, delay,
+                    )
+                    if delay:
+                        time.sleep(delay)
+                    continue
+                raise RuntimeError(f"SSI {path} failed: {payload.get('message') or payload.get('status')}")
+            return payload
+
+        raise RuntimeError(f"SSI {path} failed after quota retries")
 
     def securities(self, market: str | None = None, page_size: int = 1000) -> list[dict]:
         cache_key = (market or "ALL").upper()

@@ -59,8 +59,13 @@ class StockUniverseService:
         return list_instruments(active_only=True)
 
     @staticmethod
-    def _is_no_data_error(exc: Exception) -> bool:
-        return "there is no data" in str(exc).strip().lower()
+    def _is_temporary_ssi_error(exc: Exception) -> bool:
+        text = str(exc).strip().lower()
+        return (
+            "there is no data" in text
+            or "quota exceeded" in text
+            or "maximum admitted" in text
+        )
 
     def _database_fallback(
         self,
@@ -80,7 +85,7 @@ class StockUniverseService:
         rows.sort(key=lambda row: row["symbol"])
         return provider, rows
 
-    def _holiday_fallback(
+    def _ssi_fallback(
         self,
         group: str,
         cached: tuple[float, list[dict[str, str]]] | None,
@@ -88,7 +93,7 @@ class StockUniverseService:
     ) -> tuple[str, list[dict[str, str]]]:
         if cached is not None:
             logger.warning(
-                "SSI universe %s returned no data; using last successful SSI cache (%s rows)",
+                "SSI universe %s temporarily unavailable; using last successful SSI cache (%s rows)",
                 group,
                 len(cached[1]),
             )
@@ -96,7 +101,7 @@ class StockUniverseService:
 
         provider, rows = self._database_fallback(group)
         logger.warning(
-            "SSI universe %s returned no data and no SSI cache is available; using %s (%s rows): %s",
+            "SSI universe %s temporarily unavailable and no SSI cache is available; using %s (%s rows): %s",
             group,
             provider,
             len(rows),
@@ -132,8 +137,8 @@ class StockUniverseService:
             else:
                 rows = self.ssi.market_securities(normalized)
         except RuntimeError as exc:
-            if self._is_no_data_error(exc):
-                return self._holiday_fallback(normalized, cached, exc)
+            if self._is_temporary_ssi_error(exc):
+                return self._ssi_fallback(normalized, cached, exc)
             raise
 
         dedup = {row["symbol"]: row for row in rows if row.get("symbol")}

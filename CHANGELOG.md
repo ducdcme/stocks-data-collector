@@ -32,3 +32,10 @@
 
 - DB-first freshness and state-decision hardening.
 - Existing current symbols skip provider calls; stale symbols sync only the missing newer edge; empty symbols bootstrap history.
+
+## 0.2.9 - 2026-09-21
+
+- Add process-wide SSI request throttling with a safe 1.05s default interval.
+- Retry SSI `API calls quota exceeded` responses with bounded backoff.
+- Fall back to cache/database for universe discovery when SSI quota remains unavailable after retries.
+- Add quota/rate-limit regression coverage.

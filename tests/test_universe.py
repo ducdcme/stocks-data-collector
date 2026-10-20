@@ -130,3 +130,19 @@ def test_holiday_no_data_groups_endpoint_logic_stays_available(monkeypatch):
     assert rows[1]["preparedCount"] == 2
     assert rows[2]["preparedCount"] == 1
     assert rows[3]["preparedCount"] == 0
+
+class QuotaSSI(FakeSSI):
+    def index_components(self, index_code, page_size=1000):
+        raise RuntimeError("SSI IndexComponents failed: API calls quota exceeded! maximum admitted 1 per 1s.")
+
+    def market_securities(self, market):
+        raise RuntimeError("SSI Securities failed: API calls quota exceeded! maximum admitted 1 per 1s.")
+
+
+def test_quota_exhaustion_does_not_make_groups_endpoint_fail(monkeypatch):
+    monkeypatch.setattr("app.universe.list_instruments", lambda active_only=True: active_rows())
+    rows = StockUniverseService(QuotaSSI()).groups()
+    assert [row["group"] for row in rows] == ["VN30", "HOSE", "HNX", "UPCOM"]
+    assert rows[0]["provider"] == "database-fallback"
+    assert rows[1]["provider"] == "database-fallback"
+    assert rows[1]["preparedCount"] == 2
